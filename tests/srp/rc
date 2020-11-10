@@ -142,14 +142,7 @@ do_ib_cm_login() {
 }
 
 rdma_dev_to_net_dev() {
-	local b d rdma_dev=$1
-
-	b=/sys/class/infiniband/$rdma_dev/parent
-	if [ -e "$b" ]; then
-		echo "$(<"$b")"
-	else
-		echo "${rdma_dev%_siw}"
-	fi
+	rdma link show "$1/1" | sed 's/.* netdev //;s/[[:blank:]]*$//'
 }
 
 # Tell the SRP initiator to log in to an SRP target using the RDMA/CM.
