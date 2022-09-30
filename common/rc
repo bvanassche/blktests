@@ -197,6 +197,14 @@ _have_kernel_config_file() {
 	return 0
 }
 
+_have_sub_page_limit_support() {
+	if [[ -e /sys/debug/block/sub_page_limit_queues ]]; then
+		return 0
+	fi
+	SKIP_REASONS+=("The block layer does not have sub-page limit support")
+	return 1
+}
+
 # Check if the specified kernel option is defined.
 _check_kernel_option() {
 	local f opt=$1
