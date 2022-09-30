@@ -1,0 +1,58 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Copyright 2025 Google LLC
+#
+# Test support for segment sizes less than 4096 bytes. See also commit
+# 889c57066cee ("block: make segment size limit workable for > 4K PAGE_SIZE").
+
+. tests/block/rc
+. common/null_blk
+
+DESCRIPTION="do IO on null-blk with 512 byte segments"
+TIMED=1
+
+requires() {
+	_have_fio
+	_have_kver 6 14
+	_have_null_blk
+}
+
+test() {
+	local bs=4096
+
+	echo "Running ${TEST_NAME}"
+
+	if ! _init_null_blk nr_devices=0; then
+		echo "Loading null_blk failed"
+		return 1
+	fi
+	if ! grep -qw max_segment_size /sys/kernel/config/nullb/features; then
+		SKIP_REASONS+=("max_segment_size parameter is not supported")
+		return 1
+	fi
+	local nullb_params=(
+		blocksize="$bs"      # bytes
+		completion_nsec=0
+		max_segment_size=512 # bytes
+		memory_backed=1
+		size=1               # MiB
+		submit_queues=1
+		power=1
+	)
+	if ! _configure_null_blk nullb0 "${nullb_params[@]}"; then
+		echo "Configuring null_blk failed"
+		return 1
+	fi
+	fio --verify=md5 --rw=randwrite --bs=$bs --ioengine=psync --thread \
+		--group_reporting --sync=1 --direct=1 \
+		--name=block-099 --filename=/dev/nullb0 \
+		--output="${RESULTS_DIR}/block/fio-output-block-099.txt" \
+		>>"$FULL"
+	local fio_status=$?
+	rmdir /sys/kernel/config/nullb/nullb0
+	_exit_null_blk
+	case $fio_status in
+		0) echo "Passed";;
+		*) echo "Failed (fio status = $fio_status)";;
+	esac
+}

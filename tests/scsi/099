@@ -1,0 +1,56 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Copyright 2025 Google LLC
+#
+# Test support for segment sizes less than 4096 bytes. See also commit
+# 889c57066cee ("block: make segment size limit workable for > 4K PAGE_SIZE").
+
+. tests/block/rc
+. common/scsi_debug
+
+DESCRIPTION="do IO on scsi_debug with 512 byte segments"
+TIMED=1
+
+requires() {
+	_have_fio
+	_have_kver 6 14
+	_have_scsi_debug
+}
+
+test() {
+	local bs=4096
+
+	echo "Running ${TEST_NAME}"
+	local scsi_debug_params=(
+		add_host=1
+		clustering=1
+		delay=0
+		sector_size="$bs"      # bytes
+	)
+	if _have_module_param scsi_debug max_segment_size; then
+		scsi_debug_params+=(max_segment_size=512) # bytes
+		echo "Segment size = 512" >>"$FULL"
+	fi
+	if ! _init_scsi_debug "${scsi_debug_params[@]}"; then
+		echo "Initializing scsi_debug failed"
+		return 1
+	fi
+	local blkdev=/dev/${SCSI_DEBUG_DEVICES[0]}
+	[ -b "$blkdev" ] || return 1
+	local ioengine
+	for ioengine in psync sg; do
+		echo "$ioengine"
+		fio --verify=md5 --rw=randwrite --bs=$bs --ioengine=$ioengine \
+		    --thread --group_reporting --sync=1 --direct=1 \
+		    --name=scsi-099 --filename="$blkdev" \
+		    --output="${RESULTS_DIR}/block/fio-output-scsi-099-$ioengine.txt" \
+		    >>"$FULL"
+		local fio_status=$?
+		[ $fio_status = 0 ] || break
+	done
+	_exit_scsi_debug
+	case $fio_status in
+		0) echo "Passed";;
+		*) echo "Failed (fio status = $fio_status)";;
+	esac
+}
