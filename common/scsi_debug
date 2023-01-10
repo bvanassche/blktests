@@ -11,16 +11,17 @@ _have_scsi_debug() {
 SD_PARAM_PATH=/sys/module/scsi_debug/parameters
 SD_PSEUDO_PATH=/sys/bus/pseudo/drivers/scsi_debug
 
-# shellcheck disable=SC2317  # Don't warn about unreachable commands in this function
-_have_scsi_debug_group_number_stats() {
+# Test whether the scsi_debug driver supports zone sizes that are not a power
+# of two.
+_have_scsi_debug_npo2() {
 	modprobe -r scsi_debug >&/dev/null
-	if modprobe scsi_debug delay=0 >&/dev/null &&
-		[[ -e /sys/bus/pseudo/drivers/scsi_debug/group_number_stats ]]
+	if modprobe scsi_debug delay=0 zbc=host-managed zone_size_mb=3 >&/dev/null &&
+		[[ -e /sys/bus/pseudo/drivers/scsi_debug/adapter0 ]]
 	then
 		modprobe -r scsi_debug >&/dev/null
 		return 0
 	fi
-	SKIP_REASONS+=("scsi_debug does not support group number statistics")
+	SKIP_REASONS+=("scsi_debug does not support npo2 zone sizes")
 	modprobe -r scsi_debug >&/dev/null
 	return 1
 }
