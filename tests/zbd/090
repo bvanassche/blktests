@@ -1,0 +1,63 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0+
+# Copyright (C) 2023 Google LLC
+
+. tests/zbd/rc
+. common/null_blk
+. common/scsi_debug
+
+DESCRIPTION="test npo2 zone size support"
+QUICK=1
+
+requires() {
+	_have_fio
+	_have_module_param scsi_debug zone_size_mb
+	_have_scsi_debug_npo2
+}
+
+test() {
+	echo "Running ${TEST_NAME}" >>"$FULL"
+	echo "Running ${TEST_NAME}"
+
+	local fail
+	local scsi_debug_params=(
+		delay=0
+		dev_size_mb=1024
+		sector_size=4096
+		zbc=host-managed
+		zone_nr_conv=0
+		zone_size_mb=3
+	)
+	_init_scsi_debug "${scsi_debug_params[@]}" &&
+	local zdev="${SCSI_DEBUG_DEVICES[0]}" &&
+	local zpath="/dev/${zdev}" &&
+	ls -ld "${zpath}" >>"${FULL}" &&
+	head -n9 /sys/class/block/"${zdev}"/queue/{chunk_sectors,nr_zones} >>"${FULL}" &&
+	local fio_args=(
+		--direct=1
+		--filename="${zpath}"
+		--gtod_reduce=1
+		--ioengine=pvsync
+		--ioscheduler=none
+		--name=npo2zs
+		--runtime=10
+		--rw=randwrite
+		--time_based=1
+		--verify=crc32c
+		--verify_state_save=0
+		--zonemode=zbd
+	) &&
+	fio "${fio_args[@]}" >>"${FULL}" 2>&1 ||
+	fail=true
+
+	rm -f ./local-*-verify.state
+
+	_exit_scsi_debug
+
+	if [ -z "$fail" ]; then
+		echo "Test complete"
+	else
+		echo "Test failed"
+		return 1
+	fi
+}
