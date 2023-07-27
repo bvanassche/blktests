@@ -1,0 +1,70 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (C) 2024 Google LLC
+
+. tests/scsi/rc
+. common/scsi_debug
+
+DESCRIPTION="test requeuing of zoned writes and queue freezing"
+QUICK=1
+
+requires() {
+	_have_fio_zbd_zonemode
+}
+
+toggle_iosched() {
+	while true; do
+		for iosched in none mq-deadline; do
+			echo "${iosched}" > "/sys/class/block/$(basename "$zdev")/queue/scheduler"
+			sleep .1
+		done
+	done
+}
+
+test() {
+	echo "Running ${TEST_NAME}"
+
+	local qd=1
+	local scsi_debug_params=(
+		delay=0
+		dev_size_mb=1024
+		every_nth=$((2 * qd))
+		max_queue="${qd}"
+		opts=0x8000          # SDEBUG_OPT_HOST_BUSY
+		sector_size=4096
+		statistics=1
+		zbc=host-managed
+		zone_nr_conv=0
+		zone_size_mb=4
+	)
+	_init_scsi_debug "${scsi_debug_params[@]}" &&
+	local zdev="/dev/${SCSI_DEBUG_DEVICES[0]}" fail &&
+	ls -ld "${zdev}" >>"${FULL}" &&
+	{ toggle_iosched & } &&
+	toggle_iosched_pid=$! &&
+	local fio_args=(
+		--direct=1
+		--filename="${zdev}"
+		--iodepth="${qd}"
+		--ioengine=io_uring
+		--ioscheduler=none
+		--name=pipeline-zoned-writes
+		--output="${RESULTS_DIR}/fio-output-zbd-092.txt"
+		--runtime="${TIMEOUT:-30}"
+		--rw=randwrite
+		--time_based
+		--zonemode=zbd
+	) &&
+	_run_fio "${fio_args[@]}" >>"${FULL}" 2>&1 ||
+	fail=true
+
+	kill "${toggle_iosched_pid}" 2>&1
+	_exit_scsi_debug
+
+	if [ -z "$fail" ]; then
+		echo "Test complete"
+	else
+		echo "Test failed"
+		return 1
+	fi
+}
