@@ -1,0 +1,59 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (C) 2023 Google LLC
+
+. tests/scsi/rc
+. common/scsi_debug
+
+DESCRIPTION="test support for no write locking"
+QUICK=1
+
+requires() {
+	_have_fio_zbd_zonemode &&
+	_have_kernel_option BLK_DEV_ZONED &&
+	_have_module_param scsi_debug preserves_write_order
+}
+
+test() {
+	echo "Running ${TEST_NAME}"
+
+	#echo 7 > /sys/module/scsi_mod/parameters/scsi_logging_level
+	local scsi_debug_params=(
+		delay=0
+		dev_size_mb=1024
+		every_nth=256
+		preserves_write_order=1
+		opts=0x20000          # unaligned write
+		sector_size=4096
+		statistics=1
+		zbc=host-managed
+		zone_nr_conv=0
+		zone_size_mb=4
+	)
+	_init_scsi_debug "${scsi_debug_params[@]}" &&
+	local zdev="/dev/${SCSI_DEBUG_DEVICES[0]}" fail &&
+	ls -ld "${zdev}" >>"${FULL}" &&
+	local fio_args=(
+		--bs=4K
+		--direct=1
+		--filename="${zdev}"
+		--name=no-zwrl
+		--output="${RESULTS_DIR}/fio-output-zbd-011.txt"
+		--rw=randwrite
+		--runtime=10
+		--time_based
+		--zonemode=zbd
+	) &&
+	_run_fio "${fio_args[@]}" >>"${FULL}" 2>&1 ||
+	fail=true
+
+	_exit_scsi_debug
+
+	#echo 0 > /sys/module/scsi_mod/parameters/scsi_logging_level
+	if [ -z "$fail" ]; then
+		echo "Test complete"
+	else
+		echo "Test failed"
+		return 1
+	fi
+}
