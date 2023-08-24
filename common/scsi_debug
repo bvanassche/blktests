@@ -11,6 +11,20 @@ _have_scsi_debug() {
 SD_PARAM_PATH=/sys/module/scsi_debug/parameters
 SD_PSEUDO_PATH=/sys/bus/pseudo/drivers/scsi_debug
 
+# shellcheck disable=SC2317  # Don't warn about unreachable commands in this function
+_have_scsi_debug_group_number_stats() {
+	modprobe -r scsi_debug >&/dev/null
+	if modprobe scsi_debug delay=0 >&/dev/null &&
+		[[ -e /sys/bus/pseudo/drivers/scsi_debug/group_number_stats ]]
+	then
+		modprobe -r scsi_debug >&/dev/null
+		return 0
+	fi
+	SKIP_REASONS+=("scsi_debug does not support group number statistics")
+	modprobe -r scsi_debug >&/dev/null
+	return 1
+}
+
 _scsi_debug_key_path() {
 	local key=${1}
 
