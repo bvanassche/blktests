@@ -1,0 +1,94 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0+
+# Copyright (C) 2025 Google LLC
+
+. tests/zbd/rc
+. common/null_blk
+
+DESCRIPTION="test zoned write error handling"
+QUICK=1
+
+requires() {
+	_have_driver dm-crypt
+	_have_fio
+	_have_module null_blk
+	_have_program cryptsetup
+}
+
+test() {
+	echo "Running ${TEST_NAME}"
+
+	# A small conventional block device for the LUKS header.
+	local null_blk_params=(
+		blocksize=4096
+		completion_nsec=0
+		memory_backed=1
+		size=4            # MiB
+		submit_queues=1
+		power=1
+	)
+	_init_null_blk nr_devices=0 queue_mode=2
+	_configure_null_blk nullb0 "${null_blk_params[@]}"
+	local hdev=/dev/nullb0
+
+	# A larger zoned block device for the data.
+	local null_blk_params=(
+		blocksize=4096
+		completion_nsec=0
+		memory_backed=1
+		size=1024         # MiB
+		submit_queues=1
+		zoned=1
+		power=1
+	)
+	_configure_null_blk nullb1 "${null_blk_params[@]}"
+	local zdev=/dev/nullb1
+
+	local luks_passphrase=this-passphrase-is-not-secret
+	{ echo "${luks_passphrase}" |
+		  cryptsetup luksFormat --batch-mode ${zdev} \
+			     --header ${hdev}; }
+	local luks_vol_name=zbd-013
+	{ echo "${luks_passphrase}" |
+		  cryptsetup luksOpen \
+			     --batch-mode "${zdev}" "${luks_vol_name}" \
+			     --header ${hdev}; }
+	local luksdev="/dev/mapper/${luks_vol_name}"
+	local dmdev
+	dmdev="$(basename "$(readlink "${luksdev}")")"
+	ls -ld "${hdev}" "${zdev}" "${luksdev}" "/dev/${dmdev}" >>"${FULL}"
+	local max_sectors_zdev
+	max_sectors_zdev=/sys/block/"$(basename "$zdev")"/queue/max_sectors_kb
+	echo 4 > "${max_sectors_zdev}"
+	echo "zdev max_sectors_kb=$(<"${max_sectors_zdev}")" >>"${FULL}"
+	local max_sectors_dm
+	max_sectors_dm=/sys/block/"${dmdev}"/queue/max_sectors_kb
+	echo "dmdev max_sectors_kb=$(<"${max_sectors_dm}")" >>"${FULL}"
+	# Write at another offset than the write pointer.
+	local fio_args=(
+		--name=zbd-015
+		--filename="${luksdev}"
+		--ioengine=libaio
+		--iodepth=16
+		--rw=write
+		--direct=1
+		--offset=4096
+	)
+	for ((i=0;i<100;i++)); do
+		fio "${fio_args[@]}" >>"${FULL}" 2>&1
+		if dmesg | grep -qi ' call trace:'; then
+			fail=true
+			break
+		fi
+	done
+
+	cryptsetup luksClose "${luks_vol_name}"
+	_exit_null_blk
+
+	if [ -z "$fail" ]; then
+		echo "Test complete"
+	else
+		echo "Test failed"
+		return 1
+	fi
+}
