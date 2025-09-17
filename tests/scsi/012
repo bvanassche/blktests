@@ -1,0 +1,96 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0+
+# Copyright (C) 2025 Google LLC
+
+. common/null_blk
+. common/scsi_debug
+. tests/scsi/rc
+
+DESCRIPTION="test scsi_debug timeout and abort handling"
+QUICK=1
+
+requires() {
+	_have_scsi_debug
+}
+
+start_tracing() {
+	if [ -e /sys/kernel/tracing/tracing_on ]; then
+		(
+			set -e
+			cd /sys/kernel/tracing
+			echo 1024 > buffer_size_kb
+			echo function > current_tracer
+			echo 0 > tracing_on
+			echo > trace
+			{
+				echo scsi_error_handler
+				echo "scsi_eh_*"
+				echo scsi_timeout
+				echo scsi_try_host_reset
+			} > set_ftrace_filter
+			echo 0 > events/enable
+			echo 1 > tracing_on
+		)
+	fi
+}
+
+stop_tracing() {
+	if [ -e /sys/kernel/tracing/tracing_on ]; then
+		(
+			set -e
+			cd /sys/kernel/tracing
+			cat trace >> "${FULL}"
+			if ! grep -qw scsi_timeout trace; then
+				echo "Unexpected: scsi_timeout() has not been called"
+			fi
+			echo 0 > tracing_on
+		)
+	fi
+}
+
+run_test() {
+	set -e
+
+	local USER_HZ
+	USER_HZ=$(getconf CLK_TCK)
+	local scsi_debug_params=(
+		delay=0
+		dev_size_mb=1024
+		sector_size=512
+	)
+	_configure_scsi_debug "${scsi_debug_params[@]}"
+	local dev="/dev/${SCSI_DEBUG_DEVICES[0]}" fail
+	ls -ld "${dev}" >>"${FULL}"
+	echo 1 > "/sys/class/scsi_device/${SCSI_DEBUG_TARGETS[0]}/device/timeout" # 1 s
+	echo $((4 * USER_HZ)) > /sys/module/scsi_debug/parameters/delay           # 4 s
+	start_tracing
+
+	set +e
+
+	# The READs submitted by dd will time out and fail.
+	if dd if="${dev}" of=/dev/zero iflag=direct count=2 >>"${FULL}" 2>&1
+	then
+		echo "Unexpected: dd command succeeded"
+	fi
+	stop_tracing
+	true
+}
+
+test() {
+	echo "Running ${TEST_NAME}"
+
+	(
+		run_test
+	)
+	# shellcheck disable=SC2181
+	(($? != 0)) && fail=true
+
+	_exit_scsi_debug
+
+	if [ -z "$fail" ]; then
+		echo "Test complete"
+	else
+		echo "Test failed"
+		return 1
+	fi
+}
