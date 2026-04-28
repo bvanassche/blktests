@@ -1,0 +1,103 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0+
+# Copyright 2026 Google LLC
+#
+# Test copy offloading within dm-linear stacked on top of a block device.
+
+. tests/block/rc
+. common/null_blk
+
+DESCRIPTION="copy offloading with dm-linear"
+QUICK=1
+
+requires() {
+	_have_fio
+	_have_driver null_blk
+	_have_driver dm_mod
+}
+
+# Compare the contents of block device $1, starting from byte offset $3, with
+# the contents of block device $2, starting from byte offset $4. Compare $5
+# bytes in total.
+cmp_range() {
+	if cmp -s -n "$5" "$1" "$2" "$3" "$4"; then
+		echo "$*: content identical" >>"$FULL"
+		return
+	fi
+	echo "$*: content differs" >>"$FULL"
+	return 1
+}
+
+run_test() {
+	local mcb bs=4096 size_mb=1
+
+	# The three mcb (max_copy_bytes) values have been chosen as follows:
+	# * The first value (65536) is larger than the number of bytes copied
+	#   (3 * 4096).
+	# * The second value (4096) is smaller than the number of bytes copied.
+	# * The third value (0) triggers copying without offloading.
+	for mcb in 65536 4096 0; do
+		_init_null_blk nr_devices=0
+		echo "max_copy_bytes=$mcb ..."
+		local nullb_params=(
+			blocksize="$bs"
+			hw_queue_depth=64
+			irqmode=0
+			max_copy_bytes="$mcb"
+			memory_backed=1
+			size="$size_mb"
+			submit_queues=1
+			power=1
+		)
+		_configure_null_blk nullb0 "${nullb_params[@]}"
+		local null_blk_bdev=/dev/nullb0
+		[ -b "$null_blk_bdev" ]
+		if dd if=/dev/urandom of=$null_blk_bdev bs=1M count=$size_mb >>"${FULL}" 2>&1; then :; fi
+		if dmsetup remove test 2>/dev/null; then true; fi
+		local offset=8192
+		local length_sectors=$((((size_mb << 20) - offset)/512))
+		dmsetup create test --table "0 $length_sectors linear $null_blk_bdev $((offset/512))"
+		local bdev=/dev/mapper/test
+		[ -b "$bdev" ]
+		local src_off=$((1 * 4096))
+		local dst_off=$((5 * 4096))
+		local count=$((3 * 4096))
+		if cmp_range "$bdev" "$bdev" $src_off $dst_off $count; then
+			echo "Unexpected: source and destination ranges are identical"
+			return 1
+		fi
+		src/copy_file_range $bdev $bdev $src_off $dst_off $count \
+				    >>"$FULL" 2>&1
+		echo "Comparing copied data on $bdev" >>"$FULL"
+		cmp_range $bdev $bdev $src_off $dst_off $count
+		echo "Comparing copied data on $null_blk_bdev" >>"$FULL"
+		cmp_range $null_blk_bdev $null_blk_bdev $((src_off + offset)) \
+			$((dst_off + offset)) $count
+		dmsetup remove test
+		_exit_null_blk
+	done
+}
+
+test() {
+	echo "Running ${TEST_NAME}"
+
+	dmsetup remove test 2>/dev/null
+	_exit_null_blk
+
+	(
+		set -e
+		run_test
+	)
+	local status=$?
+
+	dmsetup remove test 2>/dev/null
+	_exit_null_blk
+
+	# shellcheck disable=SC2181
+	if [ $status = 0 ]; then
+		echo "Passed"
+	else
+		echo "Failed"
+		return 1
+	fi
+}
