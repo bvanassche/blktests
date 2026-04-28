@@ -1,0 +1,137 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0+
+# Copyright 2026 Google LLC
+#
+# Test copy offloading across an NVMe-oF connection.
+
+. tests/nvme/rc
+. common/nvme
+
+DESCRIPTION="copy offloading across NVMe-oF connection"
+QUICK=1
+nvme_trtype=loop
+# shellcheck disable=SC2034
+nvme_img_size=1025M
+
+requires() {
+	_have_fio
+	_have_driver nvmet
+	_have_driver nvme_fabrics
+	_have_driver nvme_loop
+	_have_driver null_blk
+}
+
+cmp_range() {
+	if cmp -s -n "$5" "$1" "$2" "$3" "$4"; then
+		echo "$*: content identical" >>"$FULL"
+		return
+	fi
+	echo "$*: content differs" >>"$FULL"
+	return 1
+}
+
+test_copy_offloading() {
+	local bdev=$1 count
+
+	# Test the smallest possible size, one logical block, and also a size
+	# that exceeds a single source range. The maximum length for a single
+	# source range is 2**16 logical blocks. To do: analyze why
+	# vfs_copy_file_range() doesn't behave as expected for large transfers.
+	counts=(4096)
+	if [ "$2" != file ]; then
+		counts+=($((4096 * ((2 << 16) + 1))))
+	fi
+	for count in "${counts[@]}"; do
+		echo "count=$count ..."
+
+		local src_off=$((1 * 4096))
+		local dst_off=$((src_off + count))
+
+		if dd if=/dev/urandom of="$bdev" bs=64K >>"${FULL}" 2>&1; then :; fi
+		if cmp_range "$bdev" "$bdev" $src_off $dst_off "$count"; then
+			echo "Unexpected: source and destination ranges are identical"
+			return 1
+		fi
+		src/copy_file_range "$bdev" "$bdev" $src_off $dst_off "$count" \
+				    >>"$FULL" 2>&1
+		cmp_range "$bdev" "$bdev" $src_off $dst_off "$count"
+	done
+}
+
+test_one_backend() {
+	local nvmet_bdev=$1
+
+	echo "${nvmet_bdev} backend ..."
+	_nvmet_target_setup --blkdev "${nvmet_bdev}"
+	_nvme_connect_subsys --nr-io-queues 1
+
+	nvme_bdev=/dev/$(_find_nvme_ns "${def_subsys_uuid}")
+	echo "nvme_bdev=$nvme_bdev" >>"${FULL}"
+	[ -b "$nvme_bdev" ]
+
+	test_copy_offloading "$nvme_bdev" "${nvmet_bdev}"
+
+	{
+		_nvme_disconnect_subsys
+		_nvmet_target_cleanup --blkdev "${nvmet_bdev}"
+	} >> "${FULL}" 2>&1
+}
+
+run_test() {
+	local bdev
+
+	test_one_backend file
+
+	_init_null_blk nr_devices=0
+	local nullb_params=(
+		blocksize=4096
+		hw_queue_depth=64
+		irqmode=0
+		max_copy_bytes=$(((1<<32)-1))
+		memory_backed=1
+		size=1025                    # MiB
+		submit_queues=1
+		power=1
+	)
+	_configure_null_blk nullb0 "${nullb_params[@]}"
+	test_one_backend /dev/nullb0
+	_exit_null_blk
+}
+
+test() {
+	local fail
+
+	echo "Running ${TEST_NAME}"
+
+	{
+		_nvme_disconnect_subsys
+		_nvmet_target_cleanup
+		_cleanup_nvmet
+		modprobe -r nvme_loop nvme_fabrics nvme_core nvmet
+		_exit_null_blk
+	} >&/dev/null
+
+	_setup_nvmet
+
+	(
+		set -e
+		run_test
+	)
+
+	# shellcheck disable=SC2181
+	(($? != 0)) && fail=true
+
+	{
+		_nvme_disconnect_subsys
+		_nvmet_target_cleanup
+		_cleanup_nvmet
+		_exit_null_blk
+	} >>"$FULL" 2>&1
+
+	if [ -z "$fail" ]; then
+		echo "Test complete"
+	else
+		echo "Test failed"
+		return 1
+	fi
+}
